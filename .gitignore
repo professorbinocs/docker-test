@@ -1,0 +1,22 @@
+# MacOS
+.DS_Store
+
+# Swift
+.build/
+.build_lin/
+.packages_lin/
+.swiftpm/
+Package.resolved
+
+# Xcode
+RealDeviceMap.xcodeproj/
+
+# PHPStom
+.idea
+
+resources/webroot/static/img/
+backups/
+.gitref
+.gitsha
+tmp1.png
+tmp2.png
