@@ -34,6 +34,7 @@ class IVInstanceController: InstanceControllerProto {
     private var count: UInt64 = 0
     private var shouldExit = false
     private var ivQueueLimit = 100
+    private var crappyCenter: CLLocationCoordinate2D
 
     // swiftlint:disable:next function_body_length
     init(name: String, multiPolygon: MultiPolygon, pokemonList: [UInt16], minLevel: UInt8,
@@ -48,6 +49,20 @@ class IVInstanceController: InstanceControllerProto {
         self.pokemonList = pokemonList
         self.ivQueueLimit = ivQueueLimit
         self.scatterPokemon = scatterPokemon
+        self.crappyCenter = CLLocationCoordinate2D(latitude: multiPolygon.coordinates.first?.first?.first?.latitude ?? 0.0, longitude: multiPolygon.coordinates.first?.first?.first?.longitude ?? 0.0)
+        for polygon in multiPolygon.polygons {
+            var sumLat: Double = 0.0
+            var sumLon: Double = 0.0
+            var sumN: Double = 0.0
+            for poly in polygon.coordinates {
+                for point in poly {
+                    sumLat += point.latitude
+                    sumLon += point.longitude
+                    sumN += 1.0
+                }
+            }
+            self.crappyCenter = CLLocationCoordinate2D(latitude: sumLat / sumN, longitude: sumLon / sumN)
+        }
 
         checkScannedThreadingQueue = Threading.getQueue(name: "\(name)-check-scanned", type: .serial)
         checkScannedThreadingQueue!.dispatch {
@@ -109,7 +124,8 @@ class IVInstanceController: InstanceControllerProto {
         pokemonLock.lock()
         if pokemonQueue.isEmpty {
             pokemonLock.unlock()
-            return [String: Any]()
+            return ["action": "scan_pokemon", "lat": self.crappyCenter.latitude, "lon": self.crappyCenter.longitude,
+            "min_level": minLevel, "max_level": maxLevel]
         }
         let pokemon = pokemonQueue.removeFirst()
         pokemonLock.unlock()
