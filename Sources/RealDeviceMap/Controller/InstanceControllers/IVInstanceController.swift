@@ -49,7 +49,7 @@ class IVInstanceController: InstanceControllerProto {
         self.pokemonList = pokemonList
         self.ivQueueLimit = ivQueueLimit
         self.scatterPokemon = scatterPokemon
-        self.crappyCenter = CLLocationCoordinate2D(latitude: multiPolygon.coordinates.first?.first?.first?.latitude ?? 0.0, longitude: multiPolygon.coordinates.first?.first?.first?.longitude ?? 0.0)
+        self.crappyCenter = CLLocationCoordinate2D(latitude: multiPolygon.coordinates.first?.first?.first?.latitude ?? 5.0, longitude: multiPolygon.coordinates.first?.first?.first?.longitude ?? 5.0)
         for polygon in multiPolygon.polygons {
             var sumLat: Double = 0.0
             var sumLon: Double = 0.0
