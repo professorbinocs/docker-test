@@ -10,6 +10,7 @@ import PerfectLib
 import PerfectThread
 import PerfectMySQL
 import Turf
+import S2Geometry
 
 class IVInstanceController: InstanceControllerProto {
 
@@ -29,12 +30,17 @@ class IVInstanceController: InstanceControllerProto {
     private var scannedPokemon = [(Date, Pokemon)]()
     private var scannedPokemonLock = Threading.Lock()
     private var checkScannedThreadingQueue: ThreadQueue?
+    private var staleCellThreadingQueue: ThreadQueue?
     private var statsLock = Threading.Lock()
     private var startDate: Date?
     private var count: UInt64 = 0
     private var shouldExit = false
     private var ivQueueLimit = 100
     private var crappyCenter: CLLocationCoordinate2D
+    private let staleLock = Threading.Lock()
+    private var staleCellIDs = [CLLocationCoordinate2D]()
+    private var staleTotalCount = 0
+    private var instanceCellIDs = [UInt64]()
 
     // swiftlint:disable:next function_body_length
     init(name: String, multiPolygon: MultiPolygon, pokemonList: [UInt16], minLevel: UInt8,
@@ -50,20 +56,21 @@ class IVInstanceController: InstanceControllerProto {
         self.ivQueueLimit = ivQueueLimit
         self.scatterPokemon = scatterPokemon
         self.crappyCenter = CLLocationCoordinate2D(latitude: multiPolygon.coordinates.first?.first?.first?.latitude ?? 5.0, longitude: multiPolygon.coordinates.first?.first?.first?.longitude ?? 5.0)
-        for polygon in multiPolygon.polygons {
-            var sumLat: Double = 0.0
-            var sumLon: Double = 0.0
-            var sumN: Double = 0.0
-            for poly in polygon.coordinates {
-                for point in poly {
-                    sumLat += point.latitude
-                    sumLon += point.longitude
-                    sumN += 1.0
-                }
-            }
-            self.crappyCenter = CLLocationCoordinate2D(latitude: sumLat / sumN, longitude: sumLon / sumN)
-        }
 
+        try? bootstrap()
+        
+        staleCellThreadingQueue = Threading.getQueue(name: "\(name)-check-stale", type: .serial)
+        staleCellThreadingQueue!.dispatch {
+
+            while !self.shouldExit {
+                Threading.sleep(seconds: 5.0 * 60.0)
+                if self.shouldExit {
+                    return
+                }
+                try? self.checkStaleCells()
+            }
+        }
+        
         checkScannedThreadingQueue = Threading.getQueue(name: "\(name)-check-scanned", type: .serial)
         checkScannedThreadingQueue!.dispatch {
 
@@ -114,6 +121,141 @@ class IVInstanceController: InstanceControllerProto {
 
         }
     }
+    
+    private func bootstrap() throws {
+        Log.info(message: "[IVInstanceController] [\(name)] Checking Bootstrap Status...")
+        let start = Date()
+        var totalCount = 0
+        var missingCellIDs = [S2CellId]()
+        var allCellIDs = [UInt64]()
+        for polygon in multiPolygon.polygons {
+            var sumLat: Double = 0.0
+            var sumLon: Double = 0.0
+            var sumN: Double = 0.0
+            for poly in polygon.coordinates {
+                for point in poly {
+                    sumLat += point.latitude
+                    sumLon += point.longitude
+                    sumN += 1.0
+                }
+            }
+            crappyCenter = CLLocationCoordinate2D(latitude: sumLat / sumN, longitude: sumLon / sumN)
+            
+            let cellIDs = polygon.getS2CellIDs(minLevel: 15, maxLevel: 15, maxCells: Int.max)
+            totalCount += cellIDs.count
+            let ids = cellIDs.map({ (id) -> UInt64 in
+                return id.uid
+            })
+            allCellIDs.append(contentsOf: ids)
+            let cells = try Cell.getInIDs(ids: ids).sorted(by: { (cellA, cellB) -> Bool in
+                return cellA.updated ?? 0 > cellB.updated ?? 0
+            })
+
+            let parentCellIDs = polygon.getNonInternalS2CellIDs(minLevel: 13, maxLevel: 13, maxCells: Int.max)
+            let parentCells = parentCellIDs.map({ (id) -> S2Cell in
+                return S2Cell(cellId: id)
+            })
+            
+            let existingCellIds = cells.map { (c) -> (S2CellId, UInt32?) in
+                return (S2CellId(id: Int64(c.id)), c.updated)
+            }
+            
+            for cell in existingCellIds {
+                let secondsSinceUpdate = Date().timeIntervalSince1970 - Double(cell.1 ?? 0)
+                if secondsSinceUpdate > 60 * 5 {
+                    if let pC = parentCells.first(where: {$0.contains(cell: S2Cell(cellId: cell.0))}) {
+                        if !missingCellIDs.contains(pC.cellId) {
+                            missingCellIDs.append(pC.cellId)
+                        }
+                    } else {
+                        if !missingCellIDs.contains(where: {$0 == cell.0 || S2LatLng(point: S2Cell(cellId: $0).center).getDistance(to: S2LatLng(point: S2Cell(cellId: cell.0).center), radius: S2LatLng.earthRadiusMeters) <= 600}) {
+                            missingCellIDs.append(cell.0)
+                        }
+                    }
+                }
+            }
+        }
+
+        staleLock.lock()
+        instanceCellIDs = allCellIDs
+        staleCellIDs = missingCellIDs.map({ (c) -> CLLocationCoordinate2D in
+            let cell = S2Cell(cellId: c)
+            let center = S2LatLng(point: cell.center)
+            let coord = center.coord
+            return CLLocationCoordinate2D(latitude: coord.latitude, longitude: coord.longitude)
+        })
+        staleTotalCount = missingCellIDs.count
+        Log.info(message: "[IVInstanceController] [\(name)] Found \(staleCellIDs.count) stale cells")
+        staleLock.unlock()
+
+    }
+    
+    private func checkStaleCells() throws {
+        Log.info(message: "[IVInstanceController] [\(name)] Checking for stale cells")
+        let start = Date()
+        var totalCount = 0
+        var missingCellIDs = [S2CellId]()
+        var allCellIDs = [UInt64]()
+        for polygon in multiPolygon.polygons {
+            var sumLat: Double = 0.0
+            var sumLon: Double = 0.0
+            var sumN: Double = 0.0
+            for poly in polygon.coordinates {
+                for point in poly {
+                    sumLat += point.latitude
+                    sumLon += point.longitude
+                    sumN += 1.0
+                }
+            }
+            crappyCenter = CLLocationCoordinate2D(latitude: sumLat / sumN, longitude: sumLon / sumN)
+            
+            let cellIDs = polygon.getS2CellIDs(minLevel: 15, maxLevel: 15, maxCells: Int.max)
+            totalCount += cellIDs.count
+            let ids = cellIDs.map({ (id) -> UInt64 in
+                return id.uid
+            })
+            allCellIDs.append(contentsOf: ids)
+            let cells = try Cell.getInIDs(ids: ids).sorted(by: { (cellA, cellB) -> Bool in
+                return cellA.updated ?? 0 > cellB.updated ?? 0
+            })
+
+            let parentCellIDs = polygon.getNonInternalS2CellIDs(minLevel: 13, maxLevel: 13, maxCells: Int.max)
+            let parentCells = parentCellIDs.map({ (id) -> S2Cell in
+                return S2Cell(cellId: id)
+            })
+            
+            let existingCellIds = cells.map { (c) -> (S2CellId, UInt32?) in
+                return (S2CellId(id: Int64(c.id)), c.updated)
+            }
+            
+            for cell in existingCellIds {
+                let secondsSinceUpdate = Date().timeIntervalSince1970 - Double(cell.1 ?? 0)
+                if secondsSinceUpdate > 60 * 5 {
+                    if let pC = parentCells.first(where: {$0.contains(cell: S2Cell(cellId: cell.0))}) {
+                        if !missingCellIDs.contains(pC.cellId) {
+                            missingCellIDs.append(pC.cellId)
+                        }
+                    } else {
+                        if !missingCellIDs.contains(where: {$0 == cell.0 || S2LatLng(point: S2Cell(cellId: $0).center).getDistance(to: S2LatLng(point: S2Cell(cellId: cell.0).center), radius: S2LatLng.earthRadiusMeters) <= 600}) {
+                            missingCellIDs.append(cell.0)
+                        }
+                    }
+                }
+            }
+        }
+
+        staleLock.lock()
+        instanceCellIDs = allCellIDs
+        staleCellIDs = missingCellIDs.map({ (c) -> CLLocationCoordinate2D in
+            let cell = S2Cell(cellId: c)
+            let center = S2LatLng(point: cell.center)
+            let coord = center.coord
+            return CLLocationCoordinate2D(latitude: coord.latitude, longitude: coord.longitude)
+        })
+        staleTotalCount = missingCellIDs.count
+        Log.info(message: "[IVInstanceController] [\(name)] Found \(staleCellIDs.count) stale cells")
+        staleLock.unlock()
+    }
 
     deinit {
         stop()
@@ -121,6 +263,15 @@ class IVInstanceController: InstanceControllerProto {
 
     func getTask(mysql: MySQL, uuid: String, username: String?, account: Account?) -> [String: Any] {
 
+        staleLock.lock()
+        if !staleCellIDs.isEmpty {
+            let nextStaleCell = staleCellIDs.popLast()
+            staleLock.unlock()
+            Log.info(message: "[IVInstanceController] [\(name)] Sending worker to stale cell, \(staleCellIDs.count) stale cells left")
+            return ["action": "scan_pokemon", "lat": nextStaleCell!.latitude, "lon": nextStaleCell!.longitude,
+            "min_level": minLevel, "max_level": maxLevel]
+        }
+        staleLock.unlock()
         pokemonLock.lock()
         if pokemonQueue.isEmpty {
             pokemonLock.unlock()
@@ -173,6 +324,10 @@ class IVInstanceController: InstanceControllerProto {
         if checkScannedThreadingQueue != nil {
             Threading.destroyQueue(checkScannedThreadingQueue!)
         }
+        if staleCellThreadingQueue != nil {
+            Threading.destroyQueue(staleCellThreadingQueue!)
+        }
+        
     }
 
     func getQueue() -> [Pokemon] {
