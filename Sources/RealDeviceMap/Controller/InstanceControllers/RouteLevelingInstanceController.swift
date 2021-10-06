@@ -515,6 +515,10 @@ class RouteLevelingInstanceController: InstanceControllerProto {
             sortedDiskSet.removeAll(where: {$0.value.count == 0})
         }
         Log.debug(message: "Time for disk filtering: \(String(format: "%.3f", Date().timeIntervalSince(startTime)))s)")
+        
+        for (index, coordPair) in returnDiskSet {
+            Log.debug(message:"\(coordPair.first), \(coordPair.last)")
+        }
 
         return returnDiskSet
     }

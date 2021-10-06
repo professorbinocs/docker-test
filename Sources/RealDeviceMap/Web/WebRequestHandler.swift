@@ -2256,6 +2256,8 @@ class WebRequestHandler {
                 data["circle_raid_selected"] = true
             case .circleSmartRaid:
                 data["circle_smart_raid_selected"] = true
+            case .smartStaticQuest:
+                data["smart_static_quest_selected"] = true
             case .autoQuest:
                 data["auto_quest_selected"] = true
             case .pokemonIV:
@@ -2284,7 +2286,7 @@ class WebRequestHandler {
         var newCoords: Any
 
         if type != nil && type! == .circlePokemon || type! == .circleSmartPokemon ||
-            type! == .circleRaid || type! == .circleSmartRaid {
+            type! == .circleRaid || type! == .circleSmartRaid || type! == .smartStaticQuest {
             var coords = [Coord]()
             let areaRows = area.components(separatedBy: "\n")
             for areaRow in areaRows {
@@ -2519,6 +2521,8 @@ class WebRequestHandler {
                 data["circle_pokemon_selected"] = true
             case .circleSmartPokemon:
                 data["circle_smart_pokemon_selected"] = true
+            case .smartStaticQuest:
+                data["smart_static_quest_selected"] = true
             case .circleRaid:
                 data["circle_raid_selected"] = true
             case .circleSmartRaid:
